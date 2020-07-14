@@ -150,6 +150,13 @@ static int pi_dma_write(struct pi_controller *pi) {
   return 0;
 }
 
+#include <unistd.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+static const char *serial_socket_name = "debug_socket";
+static int serial_socket;
+static int serial_client;
+
 // Initializes the PI.
 int pi_init(struct pi_controller *pi, struct bus_controller *bus,
   const uint8_t *rom, size_t rom_size, const struct save_file *sram,
@@ -163,16 +170,58 @@ int pi_init(struct pi_controller *pi, struct bus_controller *bus,
   pi->is_viewer = is_viewer;
 
   pi->bytes_to_copy = 0;
-  return 0;
+
+  // Code to create unix socket for serial
+  int return_code = 0;
+  struct sockaddr_un addr = {0};
+  if ((serial_socket = socket(AF_UNIX, SOCK_STREAM, 0)) == -1) {
+    printf("Failed to create serial unix socket\n");
+    return_code = 1;
+  }
+
+  addr.sun_family = AF_UNIX;
+  strncpy(addr.sun_path, serial_socket_name, strlen(serial_socket_name));
+  unlink(serial_socket_name);
+
+  if(bind(serial_socket, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
+    printf("Failed to bind socket\n");
+    return_code = 1;
+  }
+
+  if(listen(serial_socket, 1) == -1) {
+    printf("Failed to listen on socket\n");
+    return_code = 1;
+  }
+
+  if((serial_client = accept(serial_socket, NULL, NULL)) == -1) {
+    printf("Failed to accept client\n");
+    return_code = 1;
+  }
+
+  return return_code;
 }
 
 // Reads a word from cartridge ROM.
 int read_cart_rom(void *opaque, uint32_t address, uint32_t *word) {
   struct pi_controller *pi = (struct pi_controller *) opaque;
   unsigned offset = (address - ROM_CART_BASE_ADDRESS) & ~0x3;
+  char data;
 
-  if (pi->is_viewer && is_viewer_map(pi->is_viewer, address))
+  if (pi->is_viewer && is_viewer_map(pi->is_viewer, address)){
+    printf("In is_viewer\n");
     return read_is_viewer(pi->is_viewer, address, word);
+  }
+
+  if(address == 0x18000000) {
+    if((read(serial_client, &data, sizeof(data))) == -1) {
+      printf("Failed to read data\n");
+      return 1;
+    }
+
+    *word = data;
+    //printf("Reading %c\n", (char)data);
+    return 0;
+  }
 
   // TODO: Need to figure out correct behaviour.
   // Should this even happen to begin with?
@@ -201,6 +250,18 @@ int read_pi_regs(void *opaque, uint32_t address, uint32_t *word) {
 // Writes a word to cartridge ROM.
 int write_cart_rom(void *opaque, uint32_t address, uint32_t word, uint32_t dqm) {
   struct pi_controller *pi = (struct pi_controller *) opaque;
+  char data = word;
+  if(address == 0x18000000) {
+    //printf("Writing %c\n", (char)word);
+    if((write(serial_client, &data, sizeof(data))) == -1) {
+      printf("Failed to write data\n");
+      return 1;
+    }
+  }
+
+  if(address == 0x18000004) {
+    printf("Wrote value 0x%x\n", word);
+  }
 
   if (pi->is_viewer && is_viewer_map(pi->is_viewer, address))
     return write_is_viewer(pi->is_viewer, address, word, dqm);
